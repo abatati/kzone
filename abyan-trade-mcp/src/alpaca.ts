@@ -41,25 +41,55 @@ export interface RequestOptions {
   path: string;
   query?: Record<string, QueryValue>;
   body?: unknown;
-  api?: "broker" | "data";
+  api?: "trading" | "data";
 }
 
-export class AlpacaBrokerClient {
+function authHeaders(config: Config): Record<string, string> {
+  if (config.apiMode === "trading") {
+    return {
+      "APCA-API-KEY-ID": config.apiKey,
+      "APCA-API-SECRET-KEY": config.apiSecret,
+    };
+  }
+  return {
+    Authorization: `Basic ${Buffer.from(`${config.apiKey}:${config.apiSecret}`).toString("base64")}`,
+  };
+}
+
+export class AlpacaClient {
   constructor(
     private readonly config: Config,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
+  get apiMode() {
+    return this.config.apiMode;
+  }
+
+  private requireBrokerAccountId(accountId: string | undefined): string {
+    if (this.config.apiMode === "trading") {
+      return "";
+    }
+    if (!accountId) {
+      throw new AlpacaError(
+        "account_id is required when using Alpaca Broker API. Trading API paper/live keys do not need it.",
+        0,
+        { error: "missing_account_id" },
+      );
+    }
+    return accountId;
+  }
+
   async request(opts: RequestOptions): Promise<unknown> {
     if (!this.config.credentialsPresent) {
       throw new AlpacaError(
-        "Missing ALPACA_API_KEY / ALPACA_API_SECRET. Set Brokerdash correspondent credentials in the environment.",
+        "Missing ALPACA_API_KEY / ALPACA_API_SECRET. Set Trading API paper/live keys (PK…/AK…) or Brokerdash correspondent credentials.",
         0,
         { error: "missing_credentials" },
       );
     }
 
-    const base = opts.api === "data" ? this.config.dataBaseUrl : this.config.brokerBaseUrl;
+    const base = opts.api === "data" ? this.config.dataBaseUrl : this.config.apiBaseUrl;
     const url = new URL(opts.path, `${base}/`);
     if (opts.query) {
       for (const [key, value] of Object.entries(opts.query)) {
@@ -71,7 +101,7 @@ export class AlpacaBrokerClient {
     }
 
     const headers: Record<string, string> = {
-      Authorization: `Basic ${Buffer.from(`${this.config.apiKey}:${this.config.apiSecret}`).toString("base64")}`,
+      ...authHeaders(this.config),
       Accept: "application/json",
     };
     if (opts.body !== undefined) {
@@ -106,112 +136,182 @@ export class AlpacaBrokerClient {
   }
 
   listAccounts(query: Record<string, QueryValue> = {}) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/account" }).then((account) => [account]);
+    }
     return this.request({ method: "GET", path: "/v1/accounts", query });
   }
 
-  getAccount(accountId: string) {
-    return this.request({ method: "GET", path: `/v1/accounts/${encodeURIComponent(accountId)}` });
-  }
-
-  getTradingAccount(accountId: string) {
+  getAccount(accountId?: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/account" });
+    }
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/account`,
+      path: `/v1/accounts/${encodeURIComponent(this.requireBrokerAccountId(accountId))}`,
     });
   }
 
-  listPositions(accountId: string) {
+  getTradingAccount(accountId?: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/account" });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/positions`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/account`,
     });
   }
 
-  getPosition(accountId: string, symbol: string) {
+  listPositions(accountId?: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/positions" });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/positions/${encodeURIComponent(symbol)}`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/positions`,
     });
   }
 
-  closePosition(accountId: string, symbol: string, query: Record<string, QueryValue> = {}) {
+  getPosition(accountId: string | undefined, symbol: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({
+        method: "GET",
+        path: `/v2/positions/${encodeURIComponent(symbol)}`,
+      });
+    }
+    const id = this.requireBrokerAccountId(accountId);
+    return this.request({
+      method: "GET",
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/positions/${encodeURIComponent(symbol)}`,
+    });
+  }
+
+  closePosition(accountId: string | undefined, symbol: string, query: Record<string, QueryValue> = {}) {
+    if (this.config.apiMode === "trading") {
+      return this.request({
+        method: "DELETE",
+        path: `/v2/positions/${encodeURIComponent(symbol)}`,
+        query,
+      });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "DELETE",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/positions/${encodeURIComponent(symbol)}`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/positions/${encodeURIComponent(symbol)}`,
       query,
     });
   }
 
-  listOrders(accountId: string, query: Record<string, QueryValue> = {}) {
+  listOrders(accountId: string | undefined, query: Record<string, QueryValue> = {}) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/orders", query });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/orders`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/orders`,
       query,
     });
   }
 
-  getOrder(accountId: string, orderId: string) {
+  getOrder(accountId: string | undefined, orderId: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({
+        method: "GET",
+        path: `/v2/orders/${encodeURIComponent(orderId)}`,
+      });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/orders/${encodeURIComponent(orderId)}`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/orders/${encodeURIComponent(orderId)}`,
     });
   }
 
-  createOrder(accountId: string, body: Record<string, unknown>) {
+  createOrder(accountId: string | undefined, body: Record<string, unknown>) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "POST", path: "/v2/orders", body });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "POST",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/orders`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/orders`,
       body,
     });
   }
 
-  cancelOrder(accountId: string, orderId: string) {
+  cancelOrder(accountId: string | undefined, orderId: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({
+        method: "DELETE",
+        path: `/v2/orders/${encodeURIComponent(orderId)}`,
+      });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "DELETE",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/orders/${encodeURIComponent(orderId)}`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/orders/${encodeURIComponent(orderId)}`,
     });
   }
 
-  cancelAllOrders(accountId: string) {
+  cancelAllOrders(accountId?: string) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "DELETE", path: "/v2/orders" });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "DELETE",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/orders`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/orders`,
     });
   }
 
-  listActivities(accountId: string, query: Record<string, QueryValue> = {}) {
+  listActivities(accountId: string | undefined, query: Record<string, QueryValue> = {}) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/account/activities", query });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/accounts/${encodeURIComponent(accountId)}/activities`,
+      path: `/v1/accounts/${encodeURIComponent(id)}/activities`,
       query,
     });
   }
 
-  getPortfolioHistory(accountId: string, query: Record<string, QueryValue> = {}) {
+  getPortfolioHistory(accountId: string | undefined, query: Record<string, QueryValue> = {}) {
+    if (this.config.apiMode === "trading") {
+      return this.request({ method: "GET", path: "/v2/account/portfolio/history", query });
+    }
+    const id = this.requireBrokerAccountId(accountId);
     return this.request({
       method: "GET",
-      path: `/v1/trading/accounts/${encodeURIComponent(accountId)}/account/portfolio/history`,
+      path: `/v1/trading/accounts/${encodeURIComponent(id)}/account/portfolio/history`,
       query,
     });
   }
 
   listAssets(query: Record<string, QueryValue> = {}) {
-    return this.request({ method: "GET", path: "/v1/assets", query });
+    const path = this.config.apiMode === "trading" ? "/v2/assets" : "/v1/assets";
+    return this.request({ method: "GET", path, query });
   }
 
   getAsset(symbolOrId: string) {
+    const root = this.config.apiMode === "trading" ? "/v2/assets" : "/v1/assets";
     return this.request({
       method: "GET",
-      path: `/v1/assets/${encodeURIComponent(symbolOrId)}`,
+      path: `${root}/${encodeURIComponent(symbolOrId)}`,
     });
   }
 
   getClock() {
-    return this.request({ method: "GET", path: "/v1/clock" });
+    const path = this.config.apiMode === "trading" ? "/v2/clock" : "/v1/clock";
+    return this.request({ method: "GET", path });
   }
 
   getCalendar(query: Record<string, QueryValue> = {}) {
-    return this.request({ method: "GET", path: "/v1/calendar", query });
+    const path = this.config.apiMode === "trading" ? "/v2/calendar" : "/v1/calendar";
+    return this.request({ method: "GET", path, query });
   }
 
   getStockSnapshot(symbol: string) {
@@ -222,3 +322,6 @@ export class AlpacaBrokerClient {
     });
   }
 }
+
+/** @deprecated Use AlpacaClient */
+export const AlpacaBrokerClient = AlpacaClient;

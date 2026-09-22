@@ -8,5 +8,5 @@ const config = loadConfig();
 
 void serveStdio(() => createServer(config));
 console.error(
-  `abyan-trade-mcp listening on stdio (Alpaca Broker ${config.env} ${config.brokerBaseUrl}; credentials ${config.credentialsPresent ? "set" : "missing"})`,
+  `abyan-trade-mcp listening on stdio (Alpaca ${config.apiMode} ${config.env} ${config.apiBaseUrl}; credentials ${config.credentialsPresent ? "set" : "missing"})`,
 );

@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AlpacaBrokerClient, AlpacaError, redactPii } from "./alpaca.js";
+import { AlpacaClient, AlpacaError, redactPii } from "./alpaca.js";
 import { loadConfig } from "./config.js";
 
-function configWithCreds() {
+function brokerConfig() {
   return loadConfig({
-    ALPACA_API_KEY: "key-id",
+    ALPACA_API_KEY: "corr-key",
     ALPACA_API_SECRET: "secret",
     ALPACA_BROKER_ENV: "sandbox",
+  });
+}
+
+function paperConfig() {
+  return loadConfig({
+    ALPACA_API_KEY: "PKEXAMPLE",
+    ALPACA_API_SECRET: "secret",
+    ALPACA_TRADING_ENV: "paper",
   });
 }
 
@@ -26,9 +34,9 @@ describe("redactPii", () => {
   });
 });
 
-describe("AlpacaBrokerClient", () => {
+describe("AlpacaClient broker mode", () => {
   it("fails fast without credentials", async () => {
-    const client = new AlpacaBrokerClient(loadConfig({}));
+    const client = new AlpacaClient(loadConfig({}));
     await assert.rejects(() => client.getClock(), (err: unknown) => {
       assert.ok(err instanceof AlpacaError);
       assert.equal(err.status, 0);
@@ -38,7 +46,7 @@ describe("AlpacaBrokerClient", () => {
 
   it("sends Basic auth and hits Broker paths", async () => {
     const calls: { url: string; method: string; headers: Headers }[] = [];
-    const client = new AlpacaBrokerClient(configWithCreds(), (async (input, init) => {
+    const client = new AlpacaClient(brokerConfig(), (async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       calls.push({ url, method: String(init?.method), headers: new Headers(init?.headers) });
       return new Response(JSON.stringify({ is_open: true }), {
@@ -51,13 +59,13 @@ describe("AlpacaBrokerClient", () => {
     assert.deepEqual(clock, { is_open: true });
     assert.equal(calls[0]?.method, "GET");
     assert.equal(calls[0]?.url, "https://broker-api.sandbox.alpaca.markets/v1/clock");
-    const expected = `Basic ${Buffer.from("key-id:secret").toString("base64")}`;
+    const expected = `Basic ${Buffer.from("corr-key:secret").toString("base64")}`;
     assert.equal(calls[0]?.headers.get("authorization"), expected);
   });
 
   it("posts compact order bodies and omits empty query params", async () => {
     let captured: { url: string; body: string | undefined } | undefined;
-    const client = new AlpacaBrokerClient(configWithCreds(), (async (input, init) => {
+    const client = new AlpacaClient(brokerConfig(), (async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       captured = { url, body: typeof init?.body === "string" ? init.body : undefined };
       return new Response(JSON.stringify({ id: "ord-1" }), { status: 200 });
@@ -79,7 +87,7 @@ describe("AlpacaBrokerClient", () => {
 
   it("uses the market data host for snapshots", async () => {
     let url = "";
-    const client = new AlpacaBrokerClient(configWithCreds(), (async (input) => {
+    const client = new AlpacaClient(brokerConfig(), (async (input) => {
       url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       return new Response("{}", { status: 200 });
     }) as typeof fetch);
@@ -88,7 +96,7 @@ describe("AlpacaBrokerClient", () => {
   });
 
   it("wraps HTTP errors with status and request id", async () => {
-    const client = new AlpacaBrokerClient(configWithCreds(), (async () =>
+    const client = new AlpacaClient(brokerConfig(), (async () =>
       new Response(JSON.stringify({ message: "forbidden" }), {
         status: 403,
         headers: { "x-request-id": "abc" },
@@ -101,5 +109,47 @@ describe("AlpacaBrokerClient", () => {
       assert.deepEqual(err.body, { message: "forbidden" });
       return true;
     });
+  });
+});
+
+describe("AlpacaClient trading paper mode", () => {
+  it("sends APCA headers and hits paper Trading API v2 paths", async () => {
+    const calls: { url: string; headers: Headers }[] = [];
+    const client = new AlpacaClient(paperConfig(), (async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      calls.push({ url, headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify({ is_open: false }), { status: 200 });
+    }) as typeof fetch);
+
+    await client.getClock();
+    assert.equal(calls[0]?.url, "https://paper-api.alpaca.markets/v2/clock");
+    assert.equal(calls[0]?.headers.get("apca-api-key-id"), "PKEXAMPLE");
+    assert.equal(calls[0]?.headers.get("apca-api-secret-key"), "secret");
+    assert.equal(calls[0]?.headers.get("authorization"), null);
+  });
+
+  it("maps account and positions without a broker account id", async () => {
+    const urls: string[] = [];
+    const client = new AlpacaClient(paperConfig(), (async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      urls.push(url);
+      if (url.endsWith("/v2/account")) {
+        return new Response(JSON.stringify({ id: "acct", status: "ACTIVE" }), { status: 200 });
+      }
+      return new Response("[]", { status: 200 });
+    }) as typeof fetch);
+
+    const accounts = await client.listAccounts();
+    assert.ok(Array.isArray(accounts));
+    assert.equal((accounts as { id: string }[])[0]?.id, "acct");
+    await client.getAccount();
+    await client.listPositions();
+    await client.getAsset("AAPL");
+    assert.deepEqual(urls, [
+      "https://paper-api.alpaca.markets/v2/account",
+      "https://paper-api.alpaca.markets/v2/account",
+      "https://paper-api.alpaca.markets/v2/positions",
+      "https://paper-api.alpaca.markets/v2/assets/AAPL",
+    ]);
   });
 });

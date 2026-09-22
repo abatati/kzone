@@ -1,13 +1,17 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { AlpacaBrokerClient, AlpacaError } from "./alpaca.js";
+import { AlpacaClient, AlpacaError } from "./alpaca.js";
 import type { Config } from "./config.js";
 import { publicConfig } from "./config.js";
 
 export const SERVER_NAME = "abyan-trade";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 
-const accountId = z.string().min(1).describe("Alpaca brokerage account UUID");
+const accountId = z
+  .string()
+  .min(1)
+  .optional()
+  .describe("Broker API account UUID. Omit for Trading API paper/live (uses the authenticated account).");
 
 function compact<T extends Record<string, unknown>>(obj: T): Record<string, unknown> {
   return Object.fromEntries(
@@ -71,7 +75,7 @@ function jsonResource(uri: URL, data: unknown) {
 
 export function createServer(
   config: Config,
-  client: AlpacaBrokerClient = new AlpacaBrokerClient(config),
+  client: AlpacaClient = new AlpacaClient(config),
 ): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
@@ -80,7 +84,7 @@ export function createServer(
     {
       title: "Server status",
       description:
-        "Show whether Alpaca Broker credentials are set, and which environment (sandbox/live) this Abyan Trade MCP server is targeting. Does not return secrets.",
+        "Show API mode (trading vs broker), environment (paper/sandbox/live), hosts, and whether credentials are set. Does not return secrets.",
       inputSchema: z.object({}),
     },
     async () => jsonResult(publicConfig(config)),
@@ -91,7 +95,7 @@ export function createServer(
     {
       title: "List accounts",
       description:
-        "List brokerage accounts on the Alpaca Broker correspondent (GET /v1/accounts). Sensitive KYC fields such as tax IDs are redacted.",
+        "List accounts. Broker: GET /v1/accounts. Trading API: wraps GET /v2/account as a one-element list. KYC tax IDs are redacted.",
       inputSchema: z.object({
         query: z.string().optional().describe("Search string (email, name, account number)"),
         status: z.string().optional().describe("Account status filter, e.g. ACTIVE, APPROVED, SUBMITTED"),
@@ -111,7 +115,8 @@ export function createServer(
     "get_account",
     {
       title: "Get account",
-      description: "Get a brokerage account by id (GET /v1/accounts/{account_id}). KYC tax IDs are redacted.",
+      description:
+        "Get an account. Broker: GET /v1/accounts/{account_id}. Trading API: GET /v2/account (account_id optional). KYC tax IDs are redacted.",
       inputSchema: z.object({ account_id: accountId }),
     },
     async ({ account_id }) => runTool(() => client.getAccount(account_id)),
@@ -122,7 +127,7 @@ export function createServer(
     {
       title: "Get trading account",
       description:
-        "Get trading balances and status for an account (GET /v1/trading/accounts/{account_id}/account).",
+        "Get trading balances and status. Broker: GET /v1/trading/accounts/{account_id}/account. Trading API: GET /v2/account.",
       inputSchema: z.object({ account_id: accountId }),
     },
     async ({ account_id }) => runTool(() => client.getTradingAccount(account_id)),
@@ -132,7 +137,7 @@ export function createServer(
     "list_positions",
     {
       title: "List positions",
-      description: "List open positions for an account (GET /v1/trading/accounts/{account_id}/positions).",
+      description: "List open positions. Broker: GET /v1/trading/accounts/{account_id}/positions. Trading API: GET /v2/positions.",
       inputSchema: z.object({ account_id: accountId }),
     },
     async ({ account_id }) => runTool(() => client.listPositions(account_id)),
@@ -142,7 +147,7 @@ export function createServer(
     "get_position",
     {
       title: "Get position",
-      description: "Get an open position by symbol (GET /v1/trading/accounts/{account_id}/positions/{symbol}).",
+      description: "Get an open position by symbol. Broker or Trading API /positions/{symbol}.",
       inputSchema: z.object({
         account_id: accountId,
         symbol: z.string().min(1).describe("Ticker symbol, e.g. AAPL"),
@@ -156,7 +161,7 @@ export function createServer(
     {
       title: "Close position",
       description:
-        "Liquidate an open position (DELETE /v1/trading/accounts/{account_id}/positions/{symbol}). Uses a market order.",
+        "Liquidate an open position (DELETE .../positions/{symbol}). Uses a market order.",
       inputSchema: z.object({
         account_id: accountId,
         symbol: z.string().min(1),
@@ -172,7 +177,7 @@ export function createServer(
     "list_orders",
     {
       title: "List orders",
-      description: "List orders for an account (GET /v1/trading/accounts/{account_id}/orders).",
+      description: "List orders. Broker: GET /v1/trading/accounts/{account_id}/orders. Trading API: GET /v2/orders.",
       inputSchema: z.object({
         account_id: accountId,
         status: z.enum(["open", "closed", "all"]).optional(),
@@ -191,7 +196,7 @@ export function createServer(
     "get_order",
     {
       title: "Get order",
-      description: "Get a single order (GET /v1/trading/accounts/{account_id}/orders/{order_id}).",
+      description: "Get a single order by id.",
       inputSchema: z.object({
         account_id: accountId,
         order_id: z.string().min(1),
@@ -205,7 +210,7 @@ export function createServer(
     {
       title: "Create order",
       description:
-        "Submit an equity order for an account (POST /v1/trading/accounts/{account_id}/orders). Provide exactly one of qty or notional. This places a real (or sandbox) order.",
+        "Submit an equity order (POST /v2/orders or Broker POST /v1/trading/accounts/{account_id}/orders). Provide exactly one of qty or notional. Places an order on the configured environment.",
       inputSchema: z
         .object({
           account_id: accountId,
@@ -233,7 +238,7 @@ export function createServer(
     "cancel_order",
     {
       title: "Cancel order",
-      description: "Cancel a single open order (DELETE /v1/trading/accounts/{account_id}/orders/{order_id}).",
+      description: "Cancel a single open order.",
       inputSchema: z.object({
         account_id: accountId,
         order_id: z.string().min(1),
@@ -246,7 +251,7 @@ export function createServer(
     "cancel_all_orders",
     {
       title: "Cancel all orders",
-      description: "Cancel all open orders for an account (DELETE /v1/trading/accounts/{account_id}/orders).",
+      description: "Cancel all open orders for the account.",
       inputSchema: z.object({ account_id: accountId }),
     },
     async ({ account_id }) => runTool(() => client.cancelAllOrders(account_id)),
@@ -256,7 +261,7 @@ export function createServer(
     "list_account_activities",
     {
       title: "List account activities",
-      description: "List fills, dividends, journals, and other activities (GET /v1/accounts/{account_id}/activities).",
+      description: "List fills, dividends, journals, and other activities.",
       inputSchema: z.object({
         account_id: accountId,
         activity_types: z.string().optional().describe("Comma-separated types, e.g. FILL,CSD,DIV,JNLC"),
@@ -276,7 +281,7 @@ export function createServer(
     {
       title: "Get portfolio history",
       description:
-        "Timeseries equity and P/L (GET /v1/trading/accounts/{account_id}/account/portfolio/history).",
+        "Timeseries equity and P/L (Trading API GET /v2/account/portfolio/history, or Broker equivalent).",
       inputSchema: z.object({
         account_id: accountId,
         period: z.string().optional().describe("e.g. 1D, 1W, 1M, 3M, 1A, all"),
@@ -293,7 +298,7 @@ export function createServer(
     {
       title: "List assets",
       description:
-        "List tradable assets (GET /v1/assets). Defaults to active US equities. Optional symbol_prefix filters locally after the API response.",
+        "List tradable assets (GET /v2/assets or /v1/assets). Defaults to active US equities. Optional symbol_prefix filters locally after the API response.",
       inputSchema: z.object({
         status: z.string().optional().describe("Default: active"),
         asset_class: z.string().optional().describe("Default: us_equity"),
@@ -326,7 +331,7 @@ export function createServer(
     "get_asset",
     {
       title: "Get asset",
-      description: "Get one asset by symbol or asset id (GET /v1/assets/{symbol_or_asset_id}).",
+      description: "Get one asset by symbol or asset id (GET /v2/assets/{id} or /v1/assets/{id}).",
       inputSchema: z.object({
         symbol_or_asset_id: z.string().min(1).describe("Ticker like AAPL, or an asset UUID"),
       }),
@@ -338,7 +343,7 @@ export function createServer(
     "get_clock",
     {
       title: "Market clock",
-      description: "US equity market clock: open/closed and next open/close (GET /v1/clock).",
+      description: "US equity market clock: open/closed and next open/close (GET /v2/clock or /v1/clock).",
       inputSchema: z.object({}),
     },
     async () => runTool(() => client.getClock()),
@@ -348,7 +353,7 @@ export function createServer(
     "get_calendar",
     {
       title: "Market calendar",
-      description: "Market calendar for a date range (GET /v1/calendar).",
+      description: "Market calendar for a date range (GET /v2/calendar or /v1/calendar).",
       inputSchema: z.object({
         start: z.string().optional().describe("YYYY-MM-DD"),
         end: z.string().optional().describe("YYYY-MM-DD"),
@@ -386,7 +391,7 @@ export function createServer(
     "abyan://clock",
     {
       title: "Market clock",
-      description: "US equity market clock from Alpaca Broker API.",
+      description: "US equity market clock from Alpaca.",
       mimeType: "application/json",
     },
     async (uri) => jsonResource(uri, await client.getClock()),
@@ -397,10 +402,21 @@ export function createServer(
     "abyan://accounts",
     {
       title: "Accounts",
-      description: "Brokerage accounts on this correspondent.",
+      description: "Accounts for this API mode (Trading API returns the authenticated account).",
       mimeType: "application/json",
     },
     async (uri) => jsonResource(uri, await client.listAccounts()),
+  );
+
+  server.registerResource(
+    "account-self",
+    "abyan://account",
+    {
+      title: "Authenticated account",
+      description: "The Trading API account, or an error on Broker API until an account id is provided in the template URI.",
+      mimeType: "application/json",
+    },
+    async (uri) => jsonResource(uri, await client.getAccount()),
   );
 
   server.registerResource(

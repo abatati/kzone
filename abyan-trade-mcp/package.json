@@ -1,7 +1,7 @@
 {
   "name": "abyan-trade-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for Abyan Trade, wrapping Alpaca Broker API",
+  "version": "0.2.0",
+  "description": "MCP server for Abyan Trade, wrapping Alpaca Trading API (paper/live) and Broker API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

@@ -9,3 +9,7 @@ thumbs.db
 .DS_Store
 .idea
 
+node_modules/
+abyan-trade-mcp/dist/
+abyan-trade-mcp/.env
+
